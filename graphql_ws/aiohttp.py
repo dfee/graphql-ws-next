@@ -1,26 +1,24 @@
-import typing
-
 from aiohttp import WSMsgType, web
-import graphql
 
-from graphql_ws.abstract import AbstractSubscriptionServer
+from graphql_ws.abc import AbstractConnectionContext
+from graphql_ws.server import ConnectionClosed
 
 
-class AiohttpSubscriptionServer(AbstractSubscriptionServer):
+class AiohttpConnectionContext(AbstractConnectionContext):
     ws: web.WebSocketResponse  # pylint: disable=C0103, invalid-name
 
-    def __init__(self, ws, schema, context_value):
-        self.ws = ws  # pylint: disable=C0103, invalid-name
-        super().__init__(schema, context_value)
+    async def receive(self) -> str:
+        message = await self.ws.receive()
 
-    async def __call__(self) -> None:
-        await self.on_open()
-        async for message in self.ws:
-            if message.type == WSMsgType.TEXT:
-                await self.on_message(message.data)
-            elif message.type == WSMsgType.ERROR:
-                break
-        await self.on_close()
+        if message.type == WSMsgType.TEXT:
+            return message.data
+
+        if message.type in [
+            WSMsgType.CLOSED,
+            WSMsgType.CLOSING,
+            WSMsgType.ERROR,
+        ]:
+            raise ConnectionClosed
 
     @property
     def closed(self) -> bool:
@@ -29,18 +27,7 @@ class AiohttpSubscriptionServer(AbstractSubscriptionServer):
     async def close(self, code: int) -> None:
         await self.ws.close(code=code)
 
-    async def send(self, data: typing.Dict[str, typing.Any]) -> None:
+    async def send(self, data: str) -> None:
         if self.closed:
             return
-        await self.ws.send_json(data)
-
-
-async def subscribe(
-    ws: web.WebSocketResponse,
-    schema: graphql.GraphQLSchema,
-    context_value: typing.Any = None,
-) -> web.WebSocketResponse:
-    # pylint: disable=C0103, invalid-name
-    server = AiohttpSubscriptionServer(ws, schema, context_value)
-    await server()
-    return ws
+        await self.ws.send_str(data)

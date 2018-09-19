@@ -1,160 +1,179 @@
 import asyncio
-import typing
+import json
 
-from aiohttp import WSMessage, WSMsgType, web
+from aiohttp import web
+import aiohttp.test_utils
+import graphql
 import pytest
 
-from graphql_ws.aiohttp import AiohttpSubscriptionServer, subscribe
-from graphql_ws.protocol import WS_INTERNAL_ERROR
+from graphql_ws.server import SubscriptionServer
+from graphql_ws.aiohttp import AiohttpConnectionContext
+from graphql_ws.protocol import WS_PROTOCOL, GQLMsgType
 
-from .common import AsyncMock
+from .common import schema
 
 # pylint: disable=C0103, invalid-name
 # pylint: disable=R0201, no-self-use
 # pylint: disable=W0621, redefined-outer-name
 
 
-class TestAiohttpSubscriptionServer:
-    @pytest.fixture
-    def subserver(self, wsr, schema, context_value):
-        return AiohttpSubscriptionServer(wsr, schema, context_value)
+class hotpath:
+    def __init__(self, handler):
+        self.handler = handler
+
+        self.app = web.Application()
+        self.app.router.add_get("/", self.handle_websocket)
+        self.server = aiohttp.test_utils.TestServer(self.app)
+        self.client = aiohttp.test_utils.TestClient(self.server)
+
+        self.swsr = None  # server websocket response
+        self.cwsr = None  # client websocket response
+
+    async def handle_websocket(self, request):
+        self.swsr = web.WebSocketResponse(protocols=(WS_PROTOCOL,))
+        await self.swsr.prepare(request)
+        await self.handler(self.swsr)
+        return self.swsr
+
+    async def __aenter__(self):
+        await self.client.start_server()
+        self.cwsr = await self.client.ws_connect("/")
+        return self.cwsr
+
+    async def __aexit__(self, exc_type, exc, tb):
+        # pylint: disable=W0613, unused-argument
+        await self.client.close()
+
+
+class TestAiohttpConnectionContext:
+    @pytest.mark.asyncio
+    async def test_receive(self):
+        payload = {"test": 1}
+
+        async def handle(swsr):
+            connection_context = AiohttpConnectionContext(swsr)
+            assert await connection_context.receive() == json.dumps(payload)
+
+        async with hotpath(handle) as cwsr:
+            await cwsr.send_json(payload)
+            await cwsr.close()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("err_closing",), [(True,), (False,)])
-    async def test__call__(self, subserver, err_closing):
-        subserver.on_open = AsyncMock()
-        subserver.on_message = AsyncMock()
-        subserver.on_close = AsyncMock()
+    async def test_close(self):
+        async def handle(swsr):
+            connection_context = AiohttpConnectionContext(swsr)
+            await connection_context.close(1011)
 
-        txt_event = asyncio.Event()
-        txt_msg = WSMessage(WSMsgType.TEXT, "message", "")
-        err_event = asyncio.Event()
-        err_msg = WSMessage(WSMsgType.ERROR, "", "")
+        async with hotpath(handle) as cwsr:
+            await cwsr.receive()
+            assert cwsr.closed
 
-        async def wsr_as_aiter():
-            await txt_event.wait()
-            yield txt_msg
-            if err_closing:
-                await err_event.wait()
-                yield err_msg
-                raise Exception()
+    @pytest.mark.asyncio
+    async def test_closed(self):
+        event = asyncio.Event()
 
-        subserver.ws = wsr_as_aiter()
-        fut = asyncio.ensure_future(subserver())
-        await asyncio.sleep(.01)
+        async def handle(swsr):
+            connection_context = AiohttpConnectionContext(swsr)
+            receive_fut = asyncio.ensure_future(connection_context.receive())
+            await event.wait()
+            assert connection_context.closed
+            receive_fut.cancel()
 
-        # ensure on_open was called
-        assert not fut.done()
-        subserver.on_open.assert_called_once_with()
-
-        # ensure on_open was called
-        txt_event.set()
-        await asyncio.sleep(.01)
-        subserver.on_message.assert_called_once_with(txt_msg.data)
-
-        if err_closing:
-            # ensure error breaks the loop was called
-            assert not fut.done()
-            err_event.set()
+        async with hotpath(handle) as cwsr:
+            event.set()
             await asyncio.sleep(.01)
-
-        assert fut.done()
-        assert not fut.exception()
-        subserver.on_close.assert_called_once_with()
-
-    def test_closed(self, wsr, subserver):
-        wsr.closed = True
-        assert subserver.closed
+            await cwsr.close()
 
     @pytest.mark.asyncio
-    async def test_close(self, wsr, subserver):
-        wsr.close = AsyncMock()
-        await subserver.close(code=WS_INTERNAL_ERROR)
-        wsr.close.assert_called_once_with(code=WS_INTERNAL_ERROR)
+    async def test_send(self):
+        payload = json.dumps({"test": 1})
+
+        async def handle(swsr):
+            connection_context = AiohttpConnectionContext(swsr)
+            await connection_context.send(payload)
+
+        async with hotpath(handle) as cwsr:
+            message = await cwsr.receive()
+            assert message.data == payload
+
+
+class TestIntegration:
+    @pytest.fixture
+    def server(self):
+        return SubscriptionServer(schema, AiohttpConnectionContext)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("closed", (False, True))
-    async def test_send(self, closed, subserver, wsr):
-        wsr.send_json = AsyncMock()
-        wsr.closed = closed
-        data = object()
-        await subserver.send(data)
-        if closed:
-            wsr.send_json.assert_not_called()
-        else:
-            wsr.send_json.assert_called_once_with(data)
+    async def test_query(self, server):
+        context = {"name": "Jack"}
+        fut = None
 
+        async def handle(swsr):
+            nonlocal fut
+            fut = asyncio.ensure_future(server.handle(swsr, context))
+            await fut
 
-@pytest.mark.asyncio
-async def test_subscribe(wsr, schema, context_value, monkeypatch):
-    called_with: typing.Optional[
-        None,
-        typing.Tuple[
-            AiohttpSubscriptionServer,  # self
-            typing.Tuple[...],  # args
-            typing.Dict[str, typing.Any],  # kwargs
-        ],
-    ] = None
+        async with hotpath(handle) as cwsr:
+            message = {
+                "type": GQLMsgType.START.value,
+                "id": "0",
+                "payload": {
+                    "query": (
+                        "query getName($title: String!) { name(title: $title) }"
+                    ),
+                    "operationName": "getName",
+                    "variableValues": {"title": "Mr."},
+                },
+            }
+            await cwsr.send_json(message)
+            resp = await cwsr.receive_json()
+            assert resp == {
+                "id": "0",
+                "type": GQLMsgType.DATA.value,
+                "payload": {"data": {"name": "Mr. Jack :: getName"}},
+            }
 
-    async def mock__call__(self, *args, **kwargs):
-        nonlocal called_with
-        called_with = (self, args, kwargs)
+        assert fut.done() and not fut.cancelled() and not fut.exception()
 
-    monkeypatch.setattr(AiohttpSubscriptionServer, "__call__", mock__call__)
-    resp = await subscribe(wsr, schema, context_value)
+    @pytest.mark.asyncio
+    async def test_subscription(self, server):
+        context = {"event": asyncio.Event()}
+        fut = None
+        message = {
+            "type": GQLMsgType.START.value,
+            "id": "0",
+            "payload": {
+                "query": (
+                    """
+                    subscription subscribeCounter ($ceil: Int!) {
+                        counter(ceil: $ceil)
+                    }
+                    """
+                ),
+                "operationName": "subscribeCounter",
+                "variableValues": {"ceil": 5},
+            },
+        }
 
-    assert called_with is not None
-    # pylint: disable=E1136, unsubscriptable-object
-    subserver = called_with[0]
-    assert isinstance(subserver, AiohttpSubscriptionServer)
-    assert not called_with[1]
-    assert not called_with[2]
+        async def handle(swsr):
+            nonlocal fut
+            fut = asyncio.ensure_future(server.handle(swsr, context))
+            await fut
 
-    assert subserver.schema is schema
-    assert subserver.context_value is context_value
+        async with hotpath(handle) as cwsr:
+            await cwsr.send_json(message)
+            for i in range(5):
+                context["event"].set()
+                resp = await cwsr.receive_json()
+                assert resp == {
+                    "id": "0",
+                    "type": GQLMsgType.DATA.value,
+                    "payload": {
+                        "data": {"counter": f"{i} :: subscribeCounter"}
+                    },
+                }
 
-    assert resp is wsr
+            context["event"].set()
+            resp = await cwsr.receive_json()
+            assert resp == {"id": "0", "type": GQLMsgType.COMPLETE.value}
 
-
-# Integration tests follow
-
-
-@pytest.fixture
-def context_value():
-    return {
-        "first_name": "Jack",
-        "last_name": "Black",
-        "queue": asyncio.Queue(),
-    }
-
-
-@pytest.fixture
-def schema():
-    from .common import schema
-
-    return schema
-
-
-@pytest.fixture
-def app(schema, context_value):
-    async def handle_websocket(request):
-        ws = web.WebSocketResponse(protocols=["graphql-ws"])
-        await ws.prepare(request)
-        subserver = AiohttpSubscriptionServer(ws, schema, context_value)
-        context_value["subserver"] = subserver
-        return await subserver()
-
-    app = web.Application()
-    app.add_routes([web.get("/", handle_websocket)])
-    return app
-
-
-@pytest.fixture
-async def client(event_loop, app):
-    from aiohttp.test_utils import TestServer, TestClient
-
-    _server = TestServer(app, loop=event_loop)
-    _client = TestClient(_server, loop=event_loop)
-    await _client.start_server()
-    yield _client
-    await _client.close()
+        assert fut.done() and not fut.cancelled() and not fut.exception()

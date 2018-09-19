@@ -4,77 +4,20 @@ from unittest.mock import Mock
 
 import pytest
 
+from graphql_ws.protocol import GQLMsgType
+from graphql_ws.server import ConnectionClosed, SubscriptionServer
 from graphql_ws.testing import (
-    TERMINATE,
-    TestSubscriptionServer as _TestSubscriptionServer,
+    CLOSED,
+    TestConnectionContext as _TestConnectionContext,
     TestWebsocket as _TestWebsocket,
     TestWebsocketTransport as _TestWebsocketTransport,
 )
 
-from .common import AsyncMock
+from .common import AsyncMock, schema
 
 # pylint: disable=C0103, invalid-name
 # pylint: disable=R0201, no-self-use
 # pylint: disable=W0621, redefined-outer-name
-
-
-class TestTestSubscriptionServer:
-    @pytest.fixture
-    async def transport(self):
-        return _TestWebsocketTransport()
-
-    @pytest.fixture
-    def client(self, transport):
-        return transport.client
-
-    @pytest.fixture
-    def server(self, transport):
-        return _TestSubscriptionServer(transport.server, Mock(), Mock())
-
-    @pytest.mark.asyncio
-    async def test__call__(self, client, server):
-        server.on_open = AsyncMock()
-        server.on_message = AsyncMock()
-        server.on_close = AsyncMock()
-
-        fut = asyncio.ensure_future(server())
-        await asyncio.sleep(.01)
-        server.on_open.assert_called_once_with()
-
-        for i in range(5):
-            await client.send(f'{{"test": {i}}}')
-            await asyncio.sleep(.01)
-            server.on_message.assert_called_once_with({"test": i})
-            server.on_message.reset_mock()
-
-        await client.send(TERMINATE)
-        await asyncio.sleep(.01)
-        server.on_close.assert_called_once_with()
-        assert fut.done() and not fut.exception()
-
-    @pytest.mark.asyncio
-    async def test_closed(self, transport, server):
-        assert not server.closed
-        transport.close(1011)
-        assert server.closed
-
-    @pytest.mark.asyncio
-    async def test_close(self, transport, server):
-        await server.close(1011)
-        assert transport.close_code == 1011
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("closed", (True, False))
-    async def test_send(self, transport, client, server, closed):
-        if closed:
-            transport.close_code = 1011
-
-        await server.send({"test": 0})
-
-        if closed:
-            assert not client.local.qsize()
-        else:
-            assert await client.receive_json() == {"test": 0}
 
 
 class TestTestWebsocket:
@@ -106,13 +49,14 @@ class TestTestWebsocket:
         await endpoint.send_json(message)
         assert endpoint.remote.get_nowait() == json.dumps(message)
 
-    def test_close(self, endpoint):
-        endpoint.connection.close = Mock()
-        endpoint.close(1011)
-        endpoint.connection.close.assert_called_once_with(1011)
+    @pytest.mark.asyncio
+    async def test_close(self, endpoint):
+        endpoint.transport.close = AsyncMock()
+        await endpoint.close(1011)
+        endpoint.transport.close.assert_called_once_with(1011)
 
     def test_closed(self, endpoint):
-        endpoint.connection.close_code = 1011
+        endpoint.transport.close_code = 1011
         assert endpoint.closed
 
 
@@ -133,6 +77,150 @@ class TestTestWebsocketTransport:
 
         assert client_received == server_received == message
 
-    def test_close(self, transport):
-        transport.close(1011)
+    @pytest.mark.asyncio
+    async def test_close(self, transport):
+        await transport.close(1011)
+        assert (
+            transport.client.local.get_nowait()
+            == transport.server.local.get_nowait()
+            == CLOSED
+        )
         assert transport.closed
+
+
+class TestTestConnectionContext:
+    @pytest.fixture
+    async def transport(self):
+        return _TestWebsocketTransport()
+
+    @pytest.fixture
+    def client_ws(self, transport):
+        return transport.client
+
+    @pytest.fixture
+    def connection_context(self, transport):
+        return _TestConnectionContext(transport.server, Mock())
+
+    @pytest.mark.asyncio
+    async def test_receive(self, transport, connection_context):
+        payload = {"test": 1}
+        await transport.client.send_json(payload)
+        assert await connection_context.receive() == json.dumps(payload)
+
+    @pytest.mark.asyncio
+    async def test_closed(self, transport, connection_context):
+        assert not connection_context.closed
+        await transport.close(1011)
+        assert connection_context.closed
+
+    @pytest.mark.asyncio
+    async def test_close(self, connection_context):
+        fut = asyncio.ensure_future(connection_context.receive())
+        await connection_context.close(1011)
+        await asyncio.sleep(.01)
+        assert connection_context.closed
+        assert fut.exception() and isinstance(fut.exception(), ConnectionClosed)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("closed", (False, True))
+    async def test_send(self, transport, client_ws, connection_context, closed):
+        if closed:
+            transport._close_event.set()
+
+        await connection_context.send(json.dumps({"test": 0}))
+
+        if closed:
+            assert not client_ws.local.qsize()
+        else:
+            assert await client_ws.receive_json() == {"test": 0}
+
+
+class TestIntegration:
+    @pytest.fixture
+    async def transport(self):
+        return _TestWebsocketTransport()
+
+    @pytest.fixture
+    def server(self):
+        return SubscriptionServer(schema, _TestConnectionContext)
+
+    @pytest.mark.asyncio
+    async def test_query(self, transport, server):
+        context = {"name": "Jack"}
+
+        async def handle(ws):
+            await server.handle(ws, context)
+
+        fut = asyncio.ensure_future(handle(transport.server))
+        await asyncio.sleep(.01)
+
+        message = {
+            "type": GQLMsgType.START.value,
+            "id": "0",
+            "payload": {
+                "query": (
+                    "query getName($title: String!) { name(title: $title) }"
+                ),
+                "operationName": "getName",
+                "variableValues": {"title": "Mr."},
+            },
+        }
+
+        await transport.client.send_json(message)
+        resp = await transport.client.receive_json()
+        assert resp == {
+            "id": "0",
+            "type": GQLMsgType.DATA.value,
+            "payload": {"data": {"name": "Mr. Jack :: getName"}},
+        }
+
+        await transport.client.send(CLOSED)
+        await asyncio.sleep(.01)
+
+        assert fut.done() and not fut.cancelled() and not fut.exception()
+
+    @pytest.mark.asyncio
+    async def test_subscription(self, transport, server):
+        context = {"event": asyncio.Event()}
+
+        async def handle(ws):
+            await server.handle(ws, context)
+
+        fut = asyncio.ensure_future(handle(transport.server))
+        await asyncio.sleep(.01)
+
+        message = {
+            "type": GQLMsgType.START.value,
+            "id": "0",
+            "payload": {
+                "query": (
+                    """
+                    subscription subscribeCounter ($ceil: Int!) {
+                        counter(ceil: $ceil)
+                    }
+                    """
+                ),
+                "operationName": "subscribeCounter",
+                "variableValues": {"ceil": 5},
+            },
+        }
+
+        await transport.client.send_json(message)
+
+        for i in range(5):
+            context["event"].set()
+            resp = await transport.client.receive_json()
+            assert resp == {
+                "id": "0",
+                "type": GQLMsgType.DATA.value,
+                "payload": {"data": {"counter": f"{i} :: subscribeCounter"}},
+            }
+
+        context["event"].set()
+        resp = await transport.client.receive_json()
+        assert resp == {"id": "0", "type": GQLMsgType.COMPLETE.value}
+
+        # operation is closed, now close the connection
+        await transport.client.send(CLOSED)
+        await asyncio.sleep(.01)
+        assert fut.done() and not fut.cancelled() and not fut.exception()

@@ -2,19 +2,19 @@ import asyncio
 import json
 import typing
 
-from graphql_ws.abstract import AbstractSubscriptionServer
+from graphql_ws.abc import AbstractConnectionContext
+from graphql_ws.server import ConnectionClosed
 
-TERMINATE = '"__TERMINATE__"'
-_TERMINATE = "__TERMINATE__"
+CLOSED = "__CLOSED__"
 
 
 class TestWebsocket:
-    connection: "TestWebsocketTransport"
+    transport: "TestWebsocketTransport"
     local = asyncio.Queue()
     remote = asyncio.Queue()
 
-    def __init__(self, connection, local, remote):
-        self.connection = connection
+    def __init__(self, transport, local, remote):
+        self.transport = transport
         self.local = local
         self.remote = remote
 
@@ -32,55 +32,56 @@ class TestWebsocket:
 
     @property
     def closed(self) -> bool:
-        return self.connection.closed
+        return self.transport.closed
 
-    def close(self, code: int) -> None:
-        self.connection.close(code)
+    async def close(self, code: int) -> None:
+        await self.transport.close(code)
 
 
 class TestWebsocketTransport:
     client: TestWebsocket
     server: TestWebsocket
-    close_code: typing.Optional[int]
+    _close_event: asyncio.Event
+    close_code: typing.Optional[int] = None
 
     def __init__(self):
         queue1, queue2 = asyncio.Queue(), asyncio.Queue()
         self.client = TestWebsocket(self, queue1, queue2)
         self.server = TestWebsocket(self, queue2, queue1)
-        self.close_code = None
+        self._close_event = asyncio.Event()
 
     @property
     def closed(self) -> bool:
-        return self.close_code is not None
+        return self._close_event.is_set()
 
-    def close(self, code: int) -> None:
+    async def close(self, code: int) -> None:
+        self._close_event.set()
+        await self.client.local.put(CLOSED)
+        await self.server.local.put(CLOSED)
         self.close_code = code
 
 
-class TestSubscriptionServer(AbstractSubscriptionServer):
+class TestConnectionContext(AbstractConnectionContext):
     ws: TestWebsocket
 
-    def __init__(self, ws, schema, context_value):
-        super().__init__(schema, context_value)
+    def __init__(self, ws, context_value):
+        super().__init__(ws, context_value)
         self.ws = ws
 
-    async def __call__(self) -> None:
-        await self.on_open()
-        while True:
-            message = await self.ws.receive_json()
-            if message == _TERMINATE:
-                break
-            await self.on_message(message)
-        await self.on_close()
+    async def receive(self) -> str:
+        message = await self.ws.receive()
+        if message == CLOSED:
+            raise ConnectionClosed()
+        return message
 
     @property
     def closed(self) -> bool:
         return self.ws.closed
 
     async def close(self, code: int) -> None:
-        self.ws.close(code)
+        await self.ws.close(code)
 
-    async def send(self, data: typing.Dict[str, typing.Any]) -> None:
+    async def send(self, data: str) -> None:
         if self.closed:
             return
-        await self.ws.send_json(data)
+        await self.ws.send(data)

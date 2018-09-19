@@ -1,3 +1,4 @@
+import collections.abc
 import enum
 import json
 import typing
@@ -25,58 +26,50 @@ class GQLMsgType(enum.Enum):
     STOP = "stop"  # Client -> Server
 
 
-class OperationMessage(typing.NamedTuple):
-    id: typing.Union[str, None] = None
-    type: typing.Union[GQLMsgType, None] = None
-    payload: typing.Any = None
+class OperationMessagePayload(collections.abc.Mapping):
+    __slots__ = ("_payload",)
 
-    def serialize(self) -> str:
-        data = {}
-        if self.id:
-            data["id"] = self.id
-        if self.type:
-            data["type"] = self.type.value
-        if self.type:
-            data["payload"] = self.payload
-        return json.dumps(data)
+    def __init__(self, payload: typing.Dict[str, typing.Any]):
+        if payload is not None and not isinstance(payload, dict):
+            raise TypeError("Payload must be an object")
+        self._payload = payload or {}
 
-    @classmethod
-    def deserialize(cls, data: str) -> "OperationMessage":
-        loaded = json.loads(data)
-        return OperationMessage(
-            id=loaded.get("id"),
-            type=GQLMsgType(loaded.get("type")),
-            payload=loaded.get("payload"),
-        )
+    def __getitem__(self, key: str) -> typing.Any:
+        return self._payload[key]
 
+    def __iter__(self) -> typing.Iterator[str]:
+        return iter(self._payload)
 
-class StartPayload(typing.NamedTuple):
-    query: typing.Optional[str]
-    source: graphql.Source
-    document: typing.Optional[graphql.DocumentNode]
-    variable_values: typing.Optional[typing.Dict[str, typing.Any]]
-    operation_name: typing.Optional[str]
+    def __len__(self) -> int:
+        return len(self._payload)
 
-    @classmethod
-    def load(cls, payload: typing.Dict[str, typing.Any]) -> "StartPayload":
-        query = payload.get("query")
-        source = graphql.Source(query)
+    @property
+    def query(self):
+        return self.get("query")
+
+    @property
+    def variable_values(self):
+        return self.get("variableValues")
+
+    @property
+    def operation_name(self):
+        return self.get("operationName")
+
+    @property
+    def document(self) -> typing.Optional[graphql.DocumentNode]:
         try:
-            document = graphql.parse(source)
+            return graphql.parse(self.query)
         except Exception:  # pylint: disable=W0703, broad-except
-            document = None
+            return None
 
-        return cls(
-            query=query,
-            source=source,
-            document=document,
-            variable_values=payload.get("variableValues"),
-            operation_name=payload.get("operationName"),
-        )
+    @property
+    def source(self) -> graphql.Source:
+        return graphql.Source(self.query)
 
     @property
     def has_subscription_operation(self) -> bool:
-        if not self.document:
+        document = self.document
+        if not document:
             return False
         return any(
             [
@@ -85,17 +78,53 @@ class StartPayload(typing.NamedTuple):
             ]
         )
 
-    def __eq__(self, other: typing.Any):
+
+class OperationMessage:
+    __slots__ = ("_type", "_id", "_payload")
+
+    _type: GQLMsgType
+    _id: typing.Optional[str]
+    _payload: typing.Optional[OperationMessagePayload]
+
+    def __init__(self, type, id=None, payload=None):
+        # pylint: disable=W0622, redefined-builtin
+        self._type = GQLMsgType(type)
+        self._id = id
+        self._payload = OperationMessagePayload(payload)
+
+    def __eq__(self, other: typing.Any) -> bool:
         if not isinstance(other, type(self)):
             return False
         return all(
             [
-                self.query == other.query,
-                self.source.body == other.source.body,
-                self.source.location_offset == other.source.location_offset,
-                self.source.name == other.source.name,
-                self.document == other.document,
-                self.variable_values == other.variable_values,
-                self.operation_name == other.operation_name,
+                self.type == other.type,
+                self.id == other.id,
+                self.payload == other.payload,
             ]
         )
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def type(self) -> GQLMsgType:
+        return self._type
+
+    @property
+    def payload(self) -> OperationMessagePayload:
+        return self._payload
+
+    @classmethod
+    def load(cls, data: typing.Dict[str, typing.Any]) -> "OperationMessage":
+        if not isinstance(data, dict):
+            raise TypeError("Message must be an object")
+        return cls(
+            type=data.get("type"),
+            id=data.get("id"),
+            payload=data.get("payload"),
+        )
+
+    @classmethod
+    def loads(cls, data: str) -> "OperationMessage":
+        return cls.load(json.loads(data))

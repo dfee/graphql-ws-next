@@ -1,96 +1,149 @@
+import json
+
 import graphql
 import pytest
 
-from graphql_ws.protocol import OperationMessage, StartPayload, GQLMsgType
+from graphql_ws.protocol import (
+    OperationMessage,
+    OperationMessagePayload,
+    GQLMsgType,
+)
 
 # pylint: disable=R0201, no-self-use
 
 
-class TestOperationMessage:
+class TestOperationMessagePayload:
+    def test_attrs(self):
+        params = {
+            "query": "query myTest { test }",
+            "variableValues": {"test": 1},
+            "operationName": "myTest",
+        }
+        payload = OperationMessagePayload(params)
+        assert payload.query == params["query"]
+        assert payload.variable_values == params["variableValues"]
+        assert payload.operation_name == params["operationName"]
+
     @pytest.mark.parametrize(
-        ("id", "type", "payload", "expected"),
+        ("raw", "source", "document", "has_subscription_operation"),
         [
             pytest.param(
-                "0",
-                GQLMsgType.DATA,
-                {"query": "{ test }"},
-                '{"id": "0", "type": "data", "payload": {"query": "{ test }"}}',
-                id="complete",
+                "{ test }",
+                graphql.Source("{ test }"),
+                graphql.parse("{ test }"),
+                False,
+                id="query",
             ),
-            pytest.param(None, None, None, "{}", id="minimal"),
-        ],
-    )
-    def test_serialize(self, id, type, payload, expected):
-        # pylint: disable=W0622, redefined-builtin
-        op_msg = OperationMessage(id=id, type=type, payload=payload).serialize()
-        assert op_msg == expected
-
-    @pytest.mark.parametrize(
-        ("data", "expected"),
-        [
             pytest.param(
-                '{"id": "0", "type": "data", "payload": {"query": "{ test }"}}',
-                OperationMessage("0", GQLMsgType.DATA, {"query": "{ test }"}),
-                id="complete",
-            )
+                "subscription { test }",
+                graphql.Source("subscription { test }"),
+                graphql.parse("subscription { test }"),
+                True,
+                id="subscription",
+            ),
+            pytest.param(None, graphql.Source(None), None, False, id="missing"),
         ],
     )
-    def test_deserialize(self, data, expected):
-        # pylint: disable=W0622, redefined-builtin
-        op_msg = OperationMessage.deserialize(data)
-        assert op_msg == expected
+    def test_parsing(self, raw, source, document, has_subscription_operation):
+        payload = OperationMessagePayload({"query": raw})
 
+        assert payload.source.body == source.body
+        assert payload.source.location_offset == source.location_offset
+        assert payload.source.name == source.name
 
-class TestStartPayload:
-    @pytest.mark.parametrize(
-        ("query", "is_subscription"),
-        [
-            pytest.param(None, False, id="missing"),
-            pytest.param("{ test }", False, id="query"),
-            pytest.param("subscription { test }", True, id="subscription"),
-        ],
-    )
-    def test_load_query(self, query, is_subscription):
-        provided = {"variableValues": {"a": 1}, "operationName": "test"}
-        if query:
-            provided["query"] = query
+        assert payload.document == document
 
-        returned = StartPayload.load(provided)
-        expected = StartPayload(
-            query=provided.get("query"),
-            source=graphql.Source(provided.get("query")),
-            document=graphql.parse(graphql.Source(provided["query"]))
-            if query
-            else None,
-            variable_values=provided["variableValues"],
-            operation_name=provided["operationName"],
-        )
-        assert returned == expected
-        assert returned.has_subscription_operation == is_subscription
+        assert payload.has_subscription_operation == has_subscription_operation
 
     @pytest.mark.parametrize(
         ("key", "value"),
         [
             pytest.param(None, None, id="no_override"),
             pytest.param("query", "{ test2 }", id="query"),
-            pytest.param("source", graphql.Source("{ test2 }"), id="source"),
-            pytest.param("document", graphql.parse("{ test2 }"), id="document"),
-            pytest.param("variable_values", {"b": 2}, id="variable_values"),
-            pytest.param("operation_name", "test2", id="operation_name"),
+            pytest.param("variableValues", {"b": 2}, id="variable_values"),
+            pytest.param("operationName", "test2", id="operation_name"),
         ],
     )
     def test__eq__(self, key, value):
         kwargs = {
             "query": "{ test }",
-            "source": graphql.Source("{ test }"),
-            "document": graphql.parse("{ test }"),
-            "variable_values": {"a": 1},
-            "operation_name": "test",
+            "variableValues": {"a": 1},
+            "operationName": "test",
         }
-        payload1 = StartPayload(**kwargs)
+        payload1 = OperationMessagePayload(kwargs)
         payload2 = (
-            StartPayload(**{**kwargs, **{key: value}})
+            OperationMessagePayload({**kwargs, **{key: value}})
             if key
-            else StartPayload(**kwargs)
+            else OperationMessagePayload(kwargs)
         )
         assert (payload1 == payload2) is not bool(key)
+
+
+class TestOperationMessage:
+    @pytest.mark.parametrize(
+        ("type", "id", "payload"),
+        [
+            pytest.param("start", "0", {"query": "{ _ }"}, id="conversion"),
+            pytest.param("connection_init", None, None, id="partial"),
+        ],
+    )
+    def test_structure(self, type, id, payload):
+        # pylint: disable=W0622, redefined-builtin
+        om = OperationMessage(type=type, id=id, payload=payload)
+        assert isinstance(om.type, GQLMsgType)
+        assert om.type.value == type
+        assert om.id == id
+
+        assert isinstance(om.payload, OperationMessagePayload)
+        assert dict(om.payload) == (payload or {})
+
+    def test_load(self):
+        data = {"type": "start", "id": "0", "payload": {"query": "{ _ }"}}
+        loaded = OperationMessage.load(data)
+        assert loaded.type == GQLMsgType.START
+        assert loaded.id == "0"
+        assert loaded.payload == OperationMessagePayload({"query": "{ _ }"})
+
+    @pytest.mark.parametrize(
+        ("data", "exc"),
+        [
+            pytest.param(
+                1234,
+                TypeError(
+                    "the JSON object must be str, bytes or bytearray, not int"
+                ),
+                id="invalid_json",
+            ),
+            pytest.param(
+                "[]",
+                TypeError("Message must be an object"),
+                id="non_dict_message",
+            ),
+            pytest.param(
+                "{}",
+                ValueError("None is not a valid GQLMsgType"),
+                id="missing_type",
+            ),
+            pytest.param(
+                '{"type": "start", "payload": []}',
+                TypeError("Payload must be an object"),
+                id="invalid_payload",
+            ),
+            pytest.param(
+                '{ "asdf": ',
+                ValueError("Expecting value: line 1 column 11 (char 10)"),
+                id="malformed_json",
+            ),
+        ],
+    )
+    def test_load_raises(self, data, exc):
+        with pytest.raises(type(exc)) as exctype:
+            OperationMessage.loads(data)
+        assert exctype.value.args[0] == exc.args[0]
+
+    def test_loads(self):
+        data = '{"type": "start", "id": "0", "payload": {"query": "{ _ }"}}'
+        loaded = OperationMessage.loads(data)
+        assert loaded.type == GQLMsgType.START
+        assert loaded.id == "0"
+        assert loaded.payload == OperationMessagePayload({"query": "{ _ }"})
