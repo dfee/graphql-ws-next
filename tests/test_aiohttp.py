@@ -3,7 +3,6 @@ import json
 
 from aiohttp import web
 import aiohttp.test_utils
-import graphql
 import pytest
 
 from graphql_ws.server import SubscriptionServer
