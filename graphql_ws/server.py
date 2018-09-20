@@ -235,12 +235,13 @@ class SubscriptionServer:
             await self.send_execution_result(connection_context, op_id, result)
             return
 
-        agen = connection_context[op_id] = close_cancelling(result)
+        # agen = connection_context[op_id] = close_cancelling(result)
+        connection_context[op_id] = result
         try:
-            async for val in agen:  # pylint: disable=E1133, not-an-iterable
+            async for val in result:  # pylint: disable=E1133, not-an-iterable
                 await self.send_execution_result(connection_context, op_id, val)
         finally:
-            if connection_context.get(op_id) == agen:
+            if connection_context.get(op_id) == result:
                 del connection_context[op_id]
                 await self.send_message(
                     connection_context, op_id, GQLMsgType.COMPLETE, None

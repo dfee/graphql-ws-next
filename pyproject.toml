@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "graphql-next-ws"
+name = "graphql-ws-next"
 version = "1.0.0"
 description = ""
 authors = ["Devin Fee <devin@devinfee.com>"]
