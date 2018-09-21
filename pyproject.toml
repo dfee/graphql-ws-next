@@ -1,11 +1,25 @@
 [tool.poetry]
 name = "graphql-ws-next"
 version = "1.0.0"
-description = ""
-authors = ["Devin Fee <devin@devinfee.com>"]
 packages = [
     { include = "graphql_ws" }
 ]
+
+authors = ["Devin Fee <devin@devinfee.com>"]
+description="Websocket server for GraphQL subscriptions"
+readme = "README.rst"
+
+repository = "https://github.com/dfee/graphql-ws-next"
+
+classifiers=[
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+]
+keywords=['graphql', 'subscriptions', 'graphene', 'websockets']
+
 
 [tool.poetry.dependencies]
 python = "^3.6"
