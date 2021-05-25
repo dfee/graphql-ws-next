@@ -79,7 +79,7 @@ async def handle_graphql(request: web.Request) -> web.Response:
     result = await graphql(
         schema,
         source=req_payload.get("query"),
-        variable_values=req_payload.get("variableValues"),
+        variable_values=req_payload.get("variables"),
         operation_name=req_payload.get("operationName"),
     )
 

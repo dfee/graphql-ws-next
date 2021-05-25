@@ -14,12 +14,12 @@ class TestOperationMessagePayload:
     def test_attrs(self):
         params = {
             "query": "query myTest { test }",
-            "variableValues": {"test": 1},
+            "variables": {"test": 1},
             "operationName": "myTest",
         }
         payload = OperationMessagePayload(params)
         assert payload.query == params["query"]
-        assert payload.variable_values == params["variableValues"]
+        assert payload.variable_values == params["variables"]
         assert payload.operation_name == params["operationName"]
 
     @pytest.mark.parametrize(
@@ -58,14 +58,14 @@ class TestOperationMessagePayload:
         [
             pytest.param(None, None, id="no_override"),
             pytest.param("query", "{ test2 }", id="query"),
-            pytest.param("variableValues", {"b": 2}, id="variable_values"),
+            pytest.param("variables", {"b": 2}, id="variable_values"),
             pytest.param("operationName", "test2", id="operation_name"),
         ],
     )
     def test__eq__(self, key, value):
         kwargs = {
             "query": "{ test }",
-            "variableValues": {"a": 1},
+            "variables": {"a": 1},
             "operationName": "test",
         }
         payload1 = OperationMessagePayload(kwargs)

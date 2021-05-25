@@ -269,7 +269,9 @@ class TestSubscriptionServer:
                 "errors": [
                     {
                         "message": "test message",
-                        "locations": [[1, 15], [1, 20]],
+                        "locations": [
+                            {"line": 1, "column": 15}, 
+                            {"line": 1, "column": 20}],
                         "path": ERROR.path,
                         "extensions": ERROR.extensions,
                     }
@@ -393,7 +395,7 @@ class TestSubscriptionServer:
                     "query getName($title: String!) { name(title: $title) }"
                 ),
                 "operationName": "getName",
-                "variableValues": {"title": "Mr."},
+                "variables": {"title": "Mr."},
             },
         }
         await server.on_message(conn_context, json.dumps(message))
@@ -420,7 +422,7 @@ class TestSubscriptionServer:
                     """
                 ),
                 "operationName": "subscribeCounter",
-                "variableValues": {"ceil": 5},
+                "variables": {"ceil": 5},
             },
         }
 
@@ -479,7 +481,7 @@ class TestSubscriptionServer:
                     """
                 ),
                 "operationName": "subscribeCounter",
-                "variableValues": {"ceil": 5},
+                "variables": {"ceil": 5},
             },
         }
         start_task1 = asyncio.ensure_future(
@@ -525,7 +527,7 @@ class TestSubscriptionServer:
                     """
                 ),
                 "operationName": "subscribeCounter",
-                "variableValues": {"ceil": 5},
+                "variables": {"ceil": 5},
             },
         }
         start_task = asyncio.ensure_future(
