@@ -20,6 +20,9 @@ classifiers=[
 ]
 keywords=['graphql', 'subscriptions', 'graphene', 'websockets']
 
+[build-system]
+requires = ["poetry"]
+build-backend = "poetry.masonry.api"
 
 [tool.poetry.dependencies]
 python = "^3.6"
