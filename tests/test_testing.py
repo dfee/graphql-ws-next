@@ -162,7 +162,7 @@ class TestIntegration:
                     "query getName($title: String!) { name(title: $title) }"
                 ),
                 "operationName": "getName",
-                "variableValues": {"title": "Mr."},
+                "variables": {"title": "Mr."},
             },
         }
 
@@ -201,7 +201,7 @@ class TestIntegration:
                     """
                 ),
                 "operationName": "subscribeCounter",
-                "variableValues": {"ceil": 5},
+                "variables": {"ceil": 5},
             },
         }
 

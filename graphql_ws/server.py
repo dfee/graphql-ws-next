@@ -133,7 +133,7 @@ class SubscriptionServer:
             return
         await asyncio.wait(
             [
-                self.unsubscribe(connection_context, op_id)
+                asyncio.create_task(self.unsubscribe(connection_context, op_id))
                 for op_id in connection_context
             ]
         )

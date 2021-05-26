@@ -20,11 +20,14 @@ classifiers=[
 ]
 keywords=['graphql', 'subscriptions', 'graphene', 'websockets']
 
+[build-system]
+requires = ["poetry"]
+build-backend = "poetry.masonry.api"
 
 [tool.poetry.dependencies]
 python = "^3.6"
 aiohttp = "^3.4"
-graphql-core-next = "^1.0"
+graphql-core = "^3.0"
 
 
 [tool.poetry.dev-dependencies]
